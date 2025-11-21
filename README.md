@@ -18,7 +18,7 @@ This implementation combines:
 conda env create -f environment.yml
 
 # Activate the environment
-conda activate causal_engine
+conda activate jepa_dml
 ```
 
 ### Using pip
@@ -39,7 +39,7 @@ pip install -r requirements.txt
 Run the demo simulation to verify installation:
 
 ```bash
-conda activate causal_engine
+conda activate jepa_dml
 python scripts/train.py
 ```
 
@@ -101,7 +101,7 @@ Results including ATE estimates and errors are saved to `results/baselines/compa
 ## Project Structure
 
 ```
-causal_engine/
+jepa_dml/
 ├── scripts/
 │   ├── train.py                 # Training demo/simulation
 │   ├── inference.py             # Apply to new causal questions

@@ -1,4 +1,4 @@
-name: causal_engine
+name: jepa_dml
 channels:
   - pytorch
   - conda-forge
