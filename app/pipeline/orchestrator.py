@@ -78,12 +78,15 @@ class CausalOrchestrator:
             # We need to infer shape again or store it in metadata.
             # Let's infer from X_tensor
             _, C, T, H, W = X_tensor.shape
-            
+            # Initialize encoder
+            # Using 12 heads as requested for better visualization
             encoder = vit_small_video(
                 img_size=H,
-                patch_size=config.get('patch_size', 8),
                 num_frames=T,
+                patch_size=config.get('patch_size', 8),
                 tubelet_size=config.get('tubelet_size', 2),
+                num_heads=12, 
+                embed_dim=384, # Keep embed dim same for now, just more heads
                 in_chans=C,
                 rep_dim=config.get('rep_dim', 256)
             ).to(self.device)
@@ -115,3 +118,80 @@ class CausalOrchestrator:
             'stderr': stderr,
             'ci_95': (ate - 1.96 * stderr, ate + 1.96 * stderr)
         }
+
+    def stream_analysis(self, data_loader, config):
+        """
+        Generator that yields inference steps for visualization.
+        Yields:
+            dict: {
+                'type': 'input'|'encoding'|'prediction',
+                'data': ...
+            }
+        """
+        # 1. Identify/Train Model (Simplified for demo: just load or train)
+        # For visualization, we might just want to run the encoder on data.
+        
+        # ... (Reuse logic to get encoder) ...
+        # For now, let's assume we have the encoder.
+        # TODO: Refactor run_analysis to separate model loading.
+        
+        # Hack: Just get a model for now.
+        from src.models.encoder import vit_small_video
+        
+        print(f"[Orchestrator] Initializing encoder with: img_size={config['data_dims'][2]}, num_frames={config['data_dims'][1]}")
+        
+        # Dummy shape inference if needed, or just use config
+        encoder = vit_small_video(
+            img_size=config['data_dims'][2],
+            patch_size=config.get('patch_size', 8),
+            num_frames=config['data_dims'][1],
+            tubelet_size=config.get('tubelet_size', 2),
+            in_chans=config['data_dims'][0],
+            num_heads=12,
+            embed_dim=384,
+            rep_dim=config.get('rep_dim', 256)
+        ).to(self.device)
+        
+        print(f"[Orchestrator] Encoder pos_embed shape: {encoder.pos_embed.shape}")
+        encoder.eval()
+        
+        # 2. Stream Data
+        print("[Orchestrator] Streaming inference...")
+        import numpy as np
+        
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(data_loader):
+                x = batch['X'].to(self.device) # [B, C, T, H, W]
+                
+                # Yield Input
+                # Convert to list for JSON serialization
+                # Take first sample in batch for visualization
+                x_vis = x[0].cpu().numpy() # [C, T, H, W]
+                
+                yield {
+                    'type': 'input',
+                    'batch_idx': batch_idx,
+                    'data': x_vis.tolist() 
+                }
+                
+                # Forward Pass
+                # Encoder returns representation
+                rep, attn = encoder(x, return_last_attn=True) # [B, RepDim], [B, NumHeads, N, N]
+                rep_vis = rep[0].cpu().numpy()
+                attn_vis = attn[0].cpu().numpy() # [NumHeads, N, N]
+                
+                yield {
+                    'type': 'representation',
+                    'batch_idx': batch_idx,
+                    'data': rep_vis.tolist(),
+                    'attention': attn_vis.tolist()
+                }
+                
+                # Simulate some "prediction" or "causal effect" visualization
+                # e.g. Attention map or counterfactual
+                
+                # Slow down slightly for demo effect if needed
+                import time; time.sleep(1.5)
+                
+                if batch_idx >= 1000: # Run longer
+                    break

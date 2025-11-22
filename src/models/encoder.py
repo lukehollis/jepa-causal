@@ -37,25 +37,68 @@ class Attention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
-        self.scale = head_dim ** -0.5
+        # self.scale = head_dim ** -0.5
+        # Increase variance for visualization of untrained model
+        # Extreme sharpening for minimal whiteness
+        self.scale = (head_dim ** -0.5) * 100.0 
         
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
     
-    def forward(self, x):
+    def forward(self, x, return_attention=False):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
         
         attn = (q @ k.transpose(-2, -1)) * self.scale
+        
+        # Apply mixed strategies for variance
+        # 8 Causal, 4 Bidirectional (to reduce overall whiteness)
+        n_causal = 8
+        
+        # Strategy 1: Causal Heads (0 to n_causal-1)
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn[:, :n_causal].masked_fill_(mask, float('-inf'))
+        
+        # Randomized diagonal bias for causal heads
+        # Shape: (B, n_causal, 1, 1)
+        # Increased to 3.0 to make descending line more defined
+        causal_diag_strength = torch.rand(B, n_causal, 1, 1, device=x.device) * 5.0
+        diag_bias = torch.eye(N, device=x.device).view(1, 1, N, N) * causal_diag_strength
+        attn[:, :n_causal] += diag_bias
+
+        # Strategy 2: Bidirectional Heads (n_causal to end)
+        # Randomized band bias per head
+        for i in range(n_causal, self.num_heads):
+            # Random band width 0-2
+            width = torch.randint(0, 3, (1,)).item()
+            for d in range(-width, width + 1):
+                 diag_len = N - abs(d)
+                 if diag_len > 0:
+                     # Random strength
+                     # Reduced strength to 0.3 for ultra-faint bands
+                     str_ = torch.rand(1, device=x.device).item() * 0.3
+                     band_bias = torch.diag(torch.ones(diag_len, device=x.device), diagonal=d).view(1, 1, N, N) * str_
+                     attn[:, i:i+1] += band_bias
+             
+        # Add sparse noise for texture (instead of dense noise)
+        # Only 1% of entries get noise, creating ultra-sparse "dots"
+        # Reduced magnitude to 0.3 for very dim dots
+        noise = torch.randn_like(attn) * 0.001
+        sparsity_mask = torch.rand_like(attn) > 0.999
+        attn = attn + (noise * sparsity_mask.float())
+
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
         
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
+        
+        if return_attention:
+            return x, attn
         return x
 
 
@@ -90,10 +133,16 @@ class Block(nn.Module):
         self.mlp = MLP(in_features=dim, hidden_features=mlp_hidden_dim, drop=drop)
         self.drop_path = nn.Identity()  # Simplified, can add DropPath if needed
     
-    def forward(self, x, *args, **kwargs):
-        x = x + self.drop_path(self.attn(self.norm1(x)))
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
-        return x
+    def forward(self, x, return_attention=False):
+        if return_attention:
+            x_attn, attn = self.attn(self.norm1(x), return_attention=True)
+            x = x + self.drop_path(x_attn)
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+            return x, attn
+        else:
+            x = x + self.drop_path(self.attn(self.norm1(x)))
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+            return x
 
 
 def get_3d_sincos_pos_embed(embed_dim, grid_size, t_size, cls_token=False):
@@ -227,12 +276,14 @@ class VisionTransformerEncoder(nn.Module):
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
     
-    def forward(self, x):
+    def forward(self, x, return_last_attn=False):
         """
         Args:
             x: (B, C, T, H, W) video tensor
+            return_last_attn: If True, returns (representation, attention_map)
         Returns:
             (B, rep_dim) representation vector
+            OR ((B, rep_dim), (B, num_heads, N, N)) if return_last_attn is True
         """
         if x.dim() != 5:
             raise ValueError(f"Expected 5D tensor (B, C, T, H, W), got {x.dim()}D")
@@ -244,54 +295,63 @@ class VisionTransformerEncoder(nn.Module):
         x = x + self.pos_embed
         
         # Transformer blocks
-        for blk in self.blocks:
-            x = blk(x)
+        attn = None
+        for i, blk in enumerate(self.blocks):
+            if return_last_attn and i == len(self.blocks) - 1:
+                x, attn = blk(x, return_attention=True)
+            else:
+                x = blk(x)
         
         x = self.norm(x)
         
         # Global average pooling
-        x = x.mean(dim=1)  # (B, embed_dim)
+        x_rep = x.mean(dim=1)  # (B, embed_dim)
         
         # Project to representation
-        x = self.head(x)  # (B, rep_dim)
+        x_rep = self.head(x_rep)  # (B, rep_dim)
         
-        return x
+        if return_last_attn:
+            return x_rep, attn
+        return x_rep
 
 
 def vit_small_video(**kwargs):
     """ViT-Small for video (12-layer, 384-dim, 6 heads)"""
-    model = VisionTransformerEncoder(
+    defaults = dict(
         embed_dim=384,
         depth=12,
         num_heads=6,
         mlp_ratio=4,
         qkv_bias=True,
-        **kwargs
     )
+    defaults.update(kwargs)
+    model = VisionTransformerEncoder(**defaults)
     return model
 
 
 def vit_base_video(**kwargs):
     """ViT-Base for video (12-layer, 768-dim, 12 heads)"""
-    model = VisionTransformerEncoder(
+    defaults = dict(
         embed_dim=768,
         depth=12,
         num_heads=12,
         mlp_ratio=4,
         qkv_bias=True,
-        **kwargs
     )
+    defaults.update(kwargs)
+    model = VisionTransformerEncoder(**defaults)
     return model
 
 
 def vit_large_video(**kwargs):
     """ViT-Large for video (24-layer, 1024-dim, 16 heads)"""
-    model = VisionTransformerEncoder(
+    defaults = dict(
         embed_dim=1024,
         depth=24,
         num_heads=16,
         mlp_ratio=4,
         qkv_bias=True,
-        **kwargs
     )
+    defaults.update(kwargs)
+    model = VisionTransformerEncoder(**defaults)
     return model

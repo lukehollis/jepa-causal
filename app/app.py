@@ -88,6 +88,53 @@ def analyze(request: AnalysisRequest):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+from fastapi import WebSocket
+import json
+import asyncio
+
+@app.websocket("/ws/inference")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    print("[WS] Client connected")
+    try:
+        # Wait for config
+        data = await websocket.receive_text()
+        config = json.loads(data)
+        print(f"[WS] Received config: {config}")
+        
+        # Extract dims from config or use default
+        data_dims = tuple(config.get('data_dims', [3, 8, 32, 32]))
+        
+        # Continuously generate and stream new data
+        batch_count = 0
+        while True:
+            # Generate new batch
+            train_loader, _, _ = get_data_loaders(
+                'spatiotemporal', 
+                batch_size=1, # Batch size 1 for visualization
+                n_samples=10,  # Generate enough samples for train/val/test split
+                data_dims=data_dims
+            )
+            
+            # Stream the new batch
+            for update in orchestrator.stream_analysis(train_loader, config):
+                await websocket.send_json(update)
+                await asyncio.sleep(0.1) # Rate limit
+            
+            batch_count += 1
+            if batch_count % 10 == 0:
+                print(f"[WS] Streamed {batch_count} batches")
+            
+            # Small delay between batches to prevent overwhelming the client
+            await asyncio.sleep(0.05)
+        
+    except Exception as e:
+        print(f"[WS] Error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        await websocket.close()
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

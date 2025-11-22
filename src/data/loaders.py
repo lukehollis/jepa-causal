@@ -24,8 +24,11 @@ def get_data_loaders(dataset_name, batch_size=64, **kwargs):
     if dataset_name == 'spatiotemporal':
         # This dataset is generated on-the-fly
         # Default settings for simulation
+        print(f"[get_data_loaders] kwargs: {kwargs}")
         n_samples = kwargs.get('n_samples', 1000)
-        dataset = SpatiotemporalCausalDataset(n_samples=n_samples)
+        data_dims = kwargs.get('data_dims', (3, 16, 64, 64))
+        print(f"[get_data_loaders] Using data_dims: {data_dims}")
+        dataset = SpatiotemporalCausalDataset(n_samples=n_samples, data_dims=data_dims)
         
         # Split
         train_size = int(0.8 * len(dataset))
